@@ -1,54 +1,135 @@
-// Suma de pagos: lee fotos o capturas de comprobantes de transferencia con IA y las suma.
-// Los datos se guardan solo en este celular (localStorage). La lectura la hace la función
-// "leer-comprobante" de Supabase, que pide el PIN.
+// Suma de pagos: lee fotos o capturas de comprobantes de transferencia con IA y suma por día.
+// Los comprobantes se guardan en Firebase (proyecto del club) para verlos desde cualquier celular.
+// La lectura la hace la función "leer-comprobante" de Supabase, que pide el PIN.
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getFirestore, collection, query, where, onSnapshot, doc, getDoc, setDoc, updateDoc, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// App con nombre propio para que su sesión no se mezcle con la app de reservas (mismo dominio)
+const fb = initializeApp({
+  apiKey: "AIzaSyDSGcVPLr2S5CQhI8Lm8UVBAYoUD3fB-Bg",
+  authDomain: "reservas-club-f10.firebaseapp.com",
+  projectId: "reservas-club-f10",
+  storageBucket: "reservas-club-f10.firebasestorage.app",
+  messagingSenderId: "836276193806",
+  appId: "1:836276193806:web:3c6ddbc11c3b9f90418a5f",
+}, "suma-pagos");
+const auth = getAuth(fb);
+const db = getFirestore(fb);
+const CORREO_APP = "pagos@club-f10.app";
+const claveDe = (pin) => `Suma-${pin}-F10`;
 const URL_LECTOR = "https://qzszwuiehdjndzqfbvsw.supabase.co/functions/v1/leer-comprobante";
+const DIAS_HISTORIAL = 120;
+
 const $ = (id) => document.getElementById(id);
 const plata = (n) => "$" + Math.round(n || 0).toLocaleString("es-CO");
+const leerLocal = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const escribirLocal = (k, v) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* sin espacio */ } };
 
-let pagos = cargar();
 let pin = leerLocal("pin");
+let dia = hoyISO();
+const nube = new Map();      // comprobantes guardados en Firebase (id -> datos)
+let locales = [];            // los que se están leyendo, fallaron o no se suman (solo en este celular)
+const vistas = new Map();    // fotos grandes de esta sesión (id -> dataURL)
+let cancelarEscucha = null, nubeLista = false;
 
-// ---------- Guardado local ----------
-function leerLocal(k) { try { return localStorage.getItem(k); } catch { return null; } }
-function cargar() { try { return JSON.parse(localStorage.getItem("pagos") || "[]"); } catch { return []; } }
-function guardar() {
-  const limpio = pagos.map(({ archivo, ...p }) => p);
-  for (let intento = 0; intento < 3; intento++) {
-    try { localStorage.setItem("pagos", JSON.stringify(limpio)); return; }
-    catch {
-      // Si se llena la memoria del navegador, quita las fotos grandes más viejas (se conservan miniaturas y datos)
-      const conVista = limpio.filter((p) => p.vista);
-      conVista.slice(0, Math.ceil(conVista.length / 3) || 1).forEach((p) => delete p.vista);
-    }
-  }
-  toast("El celular se quedó sin espacio para guardar; borra comprobantes viejos.");
+// ---------- Fechas ----------
+function hoyISO() { const d = new Date(); return aISO(d); }
+function aISO(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+function aFecha(iso) { const [a, m, d] = iso.split("-").map(Number); return new Date(a, m - 1, d); }
+function sumarDias(iso, n) { const f = aFecha(iso); f.setDate(f.getDate() + n); return aISO(f); }
+const nombreFecha = (iso) => aFecha(iso).toLocaleDateString("es-CO", { weekday: "long", day: "numeric", month: "long" });
+function etiquetaDia(iso) {
+  if (iso === hoyISO()) return "hoy";
+  if (iso === sumarDias(hoyISO(), -1)) return "ayer";
+  return nombreFecha(iso);
+}
+function horaBonita(h) {
+  if (!h || !/^\d{1,2}:\d{2}/.test(h)) return "";
+  const [hh, mm] = h.split(":").map(Number);
+  return `${((hh + 11) % 12) + 1}:${String(mm).padStart(2, "0")} ${hh >= 12 ? "p. m." : "a. m."}`;
 }
 function toast(msg) {
   const t = $("toast"); t.textContent = msg; t.classList.add("ver");
   clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("ver"), 3000);
 }
 
-// ---------- PIN ----------
-async function probarPin(p) {
-  const r = await fetch(URL_LECTOR, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin: p }) });
-  return r.ok;
-}
-function mostrar() {
-  $("pantalla-pin").hidden = !!pin;
-  $("app").hidden = !pin;
-  if (pin) pintar();
-}
+// ---------- Entrada con PIN ----------
+onAuthStateChanged(auth, (u) => {
+  const dentro = !!u && !!pin;
+  $("pantalla-pin").hidden = dentro;
+  $("app").hidden = !dentro;
+  if (dentro) { escucharNube(); irA(dia); }
+  else if (cancelarEscucha) { cancelarEscucha(); cancelarEscucha = null; }
+});
 $("form-pin").addEventListener("submit", async (e) => {
   e.preventDefault();
   const p = $("pin").value.trim();
-  $("pin-error").textContent = "";
+  $("pin-error").textContent = ""; $("btn-pin").disabled = true;
   try {
-    if (await probarPin(p)) { pin = p; try { localStorage.setItem("pin", p); } catch {} mostrar(); }
-    else $("pin-error").textContent = "PIN incorrecto.";
-  } catch { $("pin-error").textContent = "Sin conexión. Intenta de nuevo."; }
+    await signInWithEmailAndPassword(auth, CORREO_APP, claveDe(p));
+    pin = p; escribirLocal("pin", p);
+    $("pantalla-pin").hidden = true; $("app").hidden = false;
+    escucharNube(); irA(dia);
+  } catch (err) {
+    $("pin-error").textContent = /network/i.test(err.code || "") ? "Sin conexión. Intenta de nuevo." : "PIN incorrecto.";
+  } finally { $("btn-pin").disabled = false; }
 });
 
-// ---------- Imágenes ----------
+// ---------- Nube ----------
+function escucharNube() {
+  if (cancelarEscucha) return;
+  const desde = sumarDias(hoyISO(), -DIAS_HISTORIAL);
+  cancelarEscucha = onSnapshot(query(collection(db, "pagos"), where("fecha", ">=", desde)), (snap) => {
+    nube.clear();
+    snap.docs.forEach((d) => nube.set(d.id, { id: d.id, ...d.data() }));
+    if (!nubeLista) { nubeLista = true; migrarViejos(); }
+    $("estado-nube").textContent = "☁️ Guardado en la nube · se ve igual en todos los celulares";
+    pintar();
+  }, (err) => {
+    console.error(err);
+    $("estado-nube").textContent = "No pude conectar con la nube. Revisa el internet.";
+  });
+}
+// Llave única por transferencia: así el mismo comprobante nunca se guarda dos veces
+function llave(d, valor) {
+  const n = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return n(d.referencia) ? `R_${n(d.referencia)}_${valor}` : `S_${valor}_${d.fecha}_${n(d.hora)}_${n(d.remitente)}`.slice(0, 140);
+}
+function motivoNoSuma(d, valor) {
+  if (!d.es_comprobante) return "No parece un comprobante";
+  if (d.estado === "fallido") return "Transferencia fallida";
+  if (!valor) return "No se leyó el valor";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.fecha || "")) return "No se leyó la fecha";
+  return "";
+}
+async function guardarEnNube(item) {
+  const d = item.datos, id = llave(d, item.valor);
+  if (nube.has(id) || (await getDoc(doc(db, "pagos", id))).exists()) { item.estado = "repetido"; return; }
+  await setDoc(doc(db, "pagos", id), {
+    valor: item.valor, fecha: d.fecha, hora: d.hora || "", banco: d.banco || "", referencia: d.referencia || "",
+    remitente: d.remitente || "", destinatario: d.destinatario || "", confianza: d.confianza || "",
+    mini: item.mini || "", creado: serverTimestamp(),
+  });
+  if (item.vista) vistas.set(id, item.vista);
+  locales = locales.filter((x) => x !== item);
+}
+// Los comprobantes que se habían subido antes (solo en este celular) pasan a la nube una sola vez
+async function migrarViejos() {
+  let viejos = [];
+  try { viejos = JSON.parse(leerLocal("pagos") || "[]"); } catch { /* nada */ }
+  if (!viejos.length) return;
+  let subidos = 0;
+  for (const p of viejos) {
+    if (p.estado !== "listo" || !p.datos || motivoNoSuma(p.datos, p.valor)) continue;
+    try { const item = { ...p, estado: "listo" }; await guardarEnNube(item); if (item.estado !== "repetido") subidos++; } catch (e) { console.error(e); }
+  }
+  escribirLocal("pagos_antes_de_la_nube", leerLocal("pagos"));
+  escribirLocal("pagos", null);
+  if (subidos) toast(`Subí a la nube ${subidos} comprobantes que tenías en este celular`);
+}
+
+// ---------- Leer imágenes ----------
 async function reducir(archivo, lado, calidad) {
   const bmp = await createImageBitmap(archivo);
   const escala = Math.min(1, lado / Math.max(bmp.width, bmp.height));
@@ -58,170 +139,171 @@ async function reducir(archivo, lado, calidad) {
   bmp.close?.();
   return c.toDataURL("image/jpeg", calidad);
 }
-
-async function leer(pago) {
-  const imagen = (await reducir(pago.archivo, 1600, 0.85)).split(",")[1];
+async function leer(item) {
+  const imagen = (await reducir(item.archivo, 1600, 0.85)).split(",")[1];
   for (let intento = 0; intento < 4; intento++) {
     let r;
-    try {
-      r = await fetch(URL_LECTOR, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin, imagen, tipo: "image/jpeg" }) });
-    } catch { await new Promise((ok) => setTimeout(ok, 3000 * (intento + 1))); continue; }
-    if (r.status === 401) { pin = null; try { localStorage.removeItem("pin"); } catch {} mostrar(); throw new Error("PIN"); }
+    try { r = await fetch(URL_LECTOR, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin, imagen, tipo: "image/jpeg" }) }); }
+    catch { await new Promise((ok) => setTimeout(ok, 3000 * (intento + 1))); continue; }
     if (r.ok) return (await r.json()).datos;
-    await new Promise((ok) => setTimeout(ok, 4000 * (intento + 1))); // el lector está ocupado: espera y reintenta
+    if (r.status === 401) throw new Error("PIN");
+    await new Promise((ok) => setTimeout(ok, 4000 * (intento + 1))); // lector ocupado: espera y reintenta
   }
   throw new Error("No se pudo leer");
 }
-
-let cola = [], trabajando = 0;
+const cola = []; let trabajando = 0;
 function procesar() {
   while (trabajando < 2 && cola.length) {
-    const pago = cola.shift(); trabajando++;
-    leer(pago)
-      .then((datos) => { Object.assign(pago, { estado: "listo", datos, valor: datos.valor }); })
-      .catch((e) => { pago.estado = e.message === "PIN" ? "pendiente" : "fallo"; })
-      .finally(() => { delete pago.archivo; trabajando--; guardar(); pintar(); procesar(); });
+    const item = cola.shift(); trabajando++;
+    leer(item)
+      .then(async (datos) => {
+        item.datos = datos; item.valor = Math.round(datos.valor || 0);
+        item.motivo = motivoNoSuma(datos, item.valor);
+        if (item.motivo) { item.estado = "revisar"; return; }
+        await guardarEnNube(item);
+        if (item.estado !== "repetido" && datos.fecha !== dia) toast(`Ese comprobante es del ${etiquetaDia(datos.fecha)}: quedó sumado en ese día`);
+      })
+      .catch((e) => { item.estado = "fallo"; item.error = e.message; })
+      .finally(() => { trabajando--; pintar(); procesar(); });
   }
 }
-
 $("archivos").addEventListener("change", async (e) => {
   const archivos = [...e.target.files];
   e.target.value = "";
   for (const archivo of archivos) {
-    const pago = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), agregado: Date.now(), estado: "leyendo", archivo };
-    try {
-      pago.mini = await reducir(archivo, 160, 0.7);
-      pago.vista = await reducir(archivo, 700, 0.7);
-    } catch { pago.estado = "fallo"; }
-    pagos.push(pago);
-    if (pago.estado === "leyendo") cola.push(pago);
+    const item = { id: "local-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), estado: "leyendo", archivo };
+    try { item.mini = await reducir(archivo, 140, 0.6); item.vista = await reducir(archivo, 900, 0.75); }
+    catch { item.estado = "fallo"; }
+    locales.push(item);
+    if (item.estado === "leyendo") cola.push(item);
   }
   pintar(); procesar();
   if (archivos.length) toast(archivos.length === 1 ? "Leyendo el comprobante…" : `Leyendo ${archivos.length} comprobantes…`);
 });
 
-// ---------- Cuentas ----------
-const normal = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-function marcar() {
-  const vistos = new Map();
-  for (const p of [...pagos].sort((a, b) => a.agregado - b.agregado)) {
-    p.repetido = false; p.motivo = "";
-    if (p.estado !== "listo") continue;
-    const d = p.datos || {};
-    if (!d.es_comprobante) { p.motivo = "No parece un comprobante"; continue; }
-    if (d.estado === "fallido") { p.motivo = "Transferencia fallida"; continue; }
-    if (!p.valor) { p.motivo = "No se leyó el valor"; continue; }
-    const llave = normal(d.referencia) ? "R" + normal(d.referencia) + "|" + p.valor : `S${p.valor}|${d.fecha}|${d.hora}|${normal(d.remitente)}`;
-    if (vistos.has(llave)) { p.repetido = true; continue; }
-    vistos.set(llave, p.id);
-  }
+// ---------- Pantalla ----------
+function irA(iso) { dia = iso; $("fecha-input").value = iso; pintar(); }
+$("dia-anterior").addEventListener("click", () => irA(sumarDias(dia, -1)));
+$("dia-siguiente").addEventListener("click", () => irA(sumarDias(dia, 1)));
+$("fecha-input").addEventListener("change", (e) => e.target.value && irA(e.target.value));
+
+function totalesPorDia() {
+  const t = {};
+  for (const p of nube.values()) { (t[p.fecha] ||= { total: 0, n: 0 }); t[p.fecha].total += p.valor; t[p.fecha].n++; }
+  return t;
 }
-const cuenta = (p) => p.estado === "listo" && !p.repetido && !p.motivo;
-
 function pintar() {
-  marcar();
-  const filtro = $("filtro-fecha").value;
-  // Fechas disponibles en el filtro
-  const fechas = [...new Set(pagos.filter((p) => p.estado === "listo" && p.datos?.fecha).map((p) => p.datos.fecha))].sort().reverse();
-  const sel = $("filtro-fecha");
-  sel.innerHTML = '<option value="">Todas las fechas</option>' + fechas.map((f) => `<option value="${f}">${nombreFecha(f)}</option>`).join("");
-  sel.value = fechas.includes(filtro) ? filtro : "";
-
-  const visibles = pagos.filter((p) => !sel.value || p.datos?.fecha === sel.value || p.estado !== "listo");
-  const validos = visibles.filter(cuenta);
-  const total = validos.reduce((s, p) => s + p.valor, 0);
-  const repetidos = visibles.filter((p) => p.repetido).length;
-  const leyendo = pagos.filter((p) => p.estado === "leyendo").length;
-  $("total-titulo").textContent = sel.value ? "Total del " + nombreFecha(sel.value) : "Total de transferencias";
+  const nombre = etiquetaDia(dia);
+  $("fecha-texto").textContent = nombre === "hoy" ? "Hoy, " + nombreFecha(dia) : nombre === "ayer" ? "Ayer, " + nombreFecha(dia) : nombre;
+  const delDia = [...nube.values()].filter((p) => p.fecha === dia).sort((a, b) => (b.hora || "").localeCompare(a.hora || ""));
+  const total = delDia.reduce((s, p) => s + p.valor, 0);
+  $("total-titulo").textContent = "Total " + (nombre === "hoy" || nombre === "ayer" ? "de " + nombre : "del " + nombre);
   $("total").textContent = plata(total);
-  $("total-detalle").textContent = !pagos.length ? "Todavía no hay comprobantes"
-    : `${validos.length} ${validos.length === 1 ? "comprobante" : "comprobantes"}` + (repetidos ? ` · ${repetidos} repetido${repetidos > 1 ? "s" : ""} sin contar` : "") + (leyendo ? ` · leyendo ${leyendo}…` : "");
-  $("btn-compartir").disabled = !validos.length;
-  $("btn-borrar").hidden = !pagos.length;
+  const pendientes = locales.filter((x) => x.estado === "leyendo").length;
+  $("total-detalle").textContent = (delDia.length ? `${delDia.length} ${delDia.length === 1 ? "comprobante" : "comprobantes"}` : "Sin comprobantes este día") + (pendientes ? ` · leyendo ${pendientes}…` : "");
 
   const ul = $("lista"); ul.innerHTML = "";
-  if (!pagos.length) { ul.innerHTML = '<li class="vacio">Agrega las fotos o capturas de las transferencias y aquí te aparece la suma.</li>'; return; }
-  // Primero los que se están leyendo o fallaron, luego por día (más reciente arriba)
-  const sinFecha = visibles.filter((p) => p.estado !== "listo" || !p.datos?.fecha);
-  sinFecha.forEach((p) => ul.appendChild(fila(p)));
-  for (const f of fechas.filter((x) => !sel.value || x === sel.value)) {
-    const delDia = visibles.filter((p) => p.estado === "listo" && p.datos?.fecha === f).sort((a, b) => (b.datos.hora || "").localeCompare(a.datos.hora || ""));
-    const sub = delDia.filter(cuenta).reduce((s, p) => s + p.valor, 0);
-    const li = document.createElement("li"); li.className = "dia";
-    li.innerHTML = `<b></b><span></span>`; li.querySelector("b").textContent = nombreFecha(f); li.querySelector("span").textContent = plata(sub);
-    ul.appendChild(li);
-    delDia.forEach((p) => ul.appendChild(fila(p)));
+  // Arriba lo que pasa en este celular (leyendo, fallidos, repetidos, por revisar)
+  for (const item of locales) if (item.estado !== "revisar" && item.estado !== "repetido" || !item.datos?.fecha || item.datos.fecha === dia) ul.appendChild(filaLocal(item));
+  delDia.forEach((p) => ul.appendChild(filaNube(p)));
+
+  // Totales por día
+  const t = totalesPorDia(), dias = Object.keys(t).sort().reverse();
+  const ud = $("lista-dias"); ud.innerHTML = "";
+  if (!dias.length) ud.innerHTML = '<li class="vacio">Aquí vas a ver el total de cada día.</li>';
+  for (const f of dias) {
+    const li = document.createElement("li");
+    if (f === dia) li.classList.add("activo");
+    li.innerHTML = '<span class="d-nombre"><span></span><small></small></span><span class="d-total"></span>';
+    li.querySelector(".d-nombre span").textContent = etiquetaDia(f) === "hoy" ? "Hoy" : etiquetaDia(f) === "ayer" ? "Ayer" : nombreFecha(f);
+    li.querySelector(".d-nombre small").textContent = `${t[f].n} ${t[f].n === 1 ? "comprobante" : "comprobantes"}`;
+    li.querySelector(".d-total").textContent = plata(t[f].total);
+    li.addEventListener("click", () => { irA(f); window.scrollTo({ top: 0, behavior: "smooth" }); });
+    ud.appendChild(li);
   }
+  $("btn-compartir").disabled = !dias.length;
 }
-function nombreFecha(iso) {
-  const [a, m, d] = iso.split("-").map(Number);
-  return new Date(a, m - 1, d).toLocaleDateString("es-CO", { weekday: "long", day: "numeric", month: "long" });
-}
-function horaBonita(h) {
-  if (!h) return "";
-  const [hh, mm] = h.split(":").map(Number);
-  return `${((hh + 11) % 12) + 1}:${String(mm).padStart(2, "0")} ${hh >= 12 ? "p. m." : "a. m."}`;
-}
+
 const ICONO_EDITAR = '<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 const ICONO_BORRAR = '<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
-function fila(p) {
+const ICONO_REINTENTAR = '<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>';
+function boton(icono, etiqueta, clase, accion) {
+  const b = document.createElement("button"); b.className = "icono" + (clase ? " " + clase : "");
+  b.innerHTML = icono; b.setAttribute("aria-label", etiqueta); b.addEventListener("click", accion); return b;
+}
+function armarFila(clase, mini, vista, valorTexto, info, etiqueta) {
   const li = document.createElement("li");
-  li.className = "pago" + (p.estado === "leyendo" ? " leyendo" : p.estado !== "listo" ? " fallo" : "") + (p.estado === "listo" && !cuenta(p) ? " excluido" : "");
+  li.className = "pago" + (clase ? " " + clase : "");
   li.innerHTML = `<img alt="Comprobante" /><div><div class="valor"></div><div class="info"></div></div><div class="acciones"></div>`;
   const img = li.querySelector("img");
-  if (p.mini) img.src = p.mini;
-  img.addEventListener("click", () => verImagen(p));
-  const d = p.datos || {};
-  const valor = li.querySelector(".valor"), info = li.querySelector(".info");
-  if (p.estado === "leyendo") valor.textContent = "Leyendo…";
-  else if (p.estado === "pendiente") valor.textContent = "Falta el PIN";
-  else if (p.estado === "fallo") valor.textContent = "No se pudo leer";
-  else {
-    valor.textContent = plata(p.valor);
-    info.textContent = [d.banco, horaBonita(d.hora), d.referencia && "Ref. " + d.referencia, d.remitente && "De " + d.remitente].filter(Boolean).join(" · ");
-    const marca = p.repetido ? ["repetido", "Repetido · no se suma"] : p.motivo ? ["revisar", p.motivo + " · no se suma"] : d.confianza !== "alta" ? ["revisar", "Revisa el valor"] : null;
-    if (marca) { const s = document.createElement("span"); s.className = "etiqueta " + marca[0]; s.textContent = marca[1]; info.after(s); }
-  }
-  const acc = li.querySelector(".acciones");
-  if (p.estado === "listo") {
-    const ed = document.createElement("button"); ed.className = "icono"; ed.innerHTML = ICONO_EDITAR; ed.setAttribute("aria-label", "Corregir valor");
-    ed.addEventListener("click", () => {
-      const v = prompt("Valor correcto de este comprobante (solo números):", p.valor);
-      if (v === null) return;
-      const n = Number(String(v).replace(/[^\d]/g, ""));
-      if (n > 0) { p.valor = n; if (p.motivo === "No se leyó el valor") p.datos.es_comprobante = true; guardar(); pintar(); toast("Valor corregido"); }
-    });
-    acc.appendChild(ed);
-  } else if ((p.estado === "fallo" || p.estado === "pendiente") && p.vista) {
-    const re = document.createElement("button"); re.className = "icono"; re.innerHTML = '<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>'; re.setAttribute("aria-label", "Intentar de nuevo");
-    re.addEventListener("click", async () => { p.archivo = await (await fetch(p.vista)).blob(); p.estado = "leyendo"; cola.push(p); pintar(); procesar(); });
-    acc.appendChild(re);
-  }
-  const bo = document.createElement("button"); bo.className = "icono borrar"; bo.innerHTML = ICONO_BORRAR; bo.setAttribute("aria-label", "Quitar este comprobante");
-  bo.addEventListener("click", () => { if (!confirm("¿Quitar este comprobante de la suma?")) return; pagos = pagos.filter((x) => x !== p); guardar(); pintar(); });
-  acc.appendChild(bo);
+  if (mini) img.src = mini;
+  img.addEventListener("click", () => verImagen(vista || mini));
+  li.querySelector(".valor").textContent = valorTexto;
+  li.querySelector(".info").textContent = info;
+  if (etiqueta) { const s = document.createElement("span"); s.className = "etiqueta " + etiqueta[0]; s.textContent = etiqueta[1]; li.querySelector(".info").after(s); }
   return li;
 }
-function verImagen(p) {
-  if (!p.vista && !p.mini) return;
+const infoDe = (d) => [d.banco, horaBonita(d.hora), d.referencia && "Ref. " + d.referencia, d.remitente && "De " + d.remitente].filter(Boolean).join(" · ");
+
+function filaNube(p) {
+  const li = armarFila("", p.mini, vistas.get(p.id), plata(p.valor), infoDe(p), p.confianza && p.confianza !== "alta" ? ["revisar", "Revisa el valor"] : null);
+  const acc = li.querySelector(".acciones");
+  acc.appendChild(boton(ICONO_EDITAR, "Corregir valor", "", async () => {
+    const v = prompt("Valor correcto de este comprobante (solo números):", p.valor);
+    if (v === null) return;
+    const n = Number(String(v).replace(/[^\d]/g, ""));
+    if (!(n > 0)) return;
+    try { await updateDoc(doc(db, "pagos", p.id), { valor: n, confianza: "alta" }); toast("Valor corregido"); }
+    catch (e) { console.error(e); toast("No se pudo corregir. Revisa el internet."); }
+  }));
+  acc.appendChild(boton(ICONO_BORRAR, "Quitar este comprobante", "borrar", async () => {
+    if (!confirm(`¿Quitar este comprobante de ${plata(p.valor)} de la suma? Se borra en todos los celulares.`)) return;
+    try { await deleteDoc(doc(db, "pagos", p.id)); toast("Comprobante quitado"); }
+    catch (e) { console.error(e); toast("No se pudo quitar. Revisa el internet."); }
+  }));
+  return li;
+}
+function filaLocal(item) {
+  const d = item.datos || {};
+  let texto = "", etiqueta = null, clase = "";
+  if (item.estado === "leyendo") { texto = "Leyendo…"; clase = "leyendo"; }
+  else if (item.estado === "fallo") { texto = item.error === "PIN" ? "El PIN cambió" : "No se pudo leer"; clase = "fallo"; }
+  else if (item.estado === "repetido") { texto = plata(item.valor); clase = "excluido"; etiqueta = ["repetido", "Ya estaba guardado · no se suma otra vez"]; }
+  else if (item.estado === "revisar") { texto = item.valor ? plata(item.valor) : "Sin valor"; clase = "excluido"; etiqueta = ["revisar", item.motivo + " · no se suma"]; }
+  const li = armarFila(clase, item.mini, item.vista, texto, infoDe(d), etiqueta);
+  const acc = li.querySelector(".acciones");
+  if (item.estado === "revisar" && item.motivo !== "Transferencia fallida") {
+    acc.appendChild(boton(ICONO_EDITAR, "Corregir y guardar", "", async () => {
+      const v = prompt("Valor de este comprobante (solo números):", item.valor || "");
+      if (v === null) return;
+      const n = Number(String(v).replace(/[^\d]/g, ""));
+      let f = d.fecha;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(f || "")) { f = prompt("Fecha de la transferencia (AAAA-MM-DD):", dia); if (!f || !/^\d{4}-\d{2}-\d{2}$/.test(f)) return; }
+      if (!(n > 0)) return;
+      item.valor = n; item.datos = { ...d, es_comprobante: true, fecha: f, confianza: "alta" };
+      try { await guardarEnNube(item); pintar(); toast(item.estado === "repetido" ? "Ese comprobante ya estaba guardado" : "Guardado y sumado"); }
+      catch (e) { console.error(e); toast("No se pudo guardar. Revisa el internet."); }
+    }));
+  }
+  if (item.estado === "fallo" && item.vista) {
+    acc.appendChild(boton(ICONO_REINTENTAR, "Intentar de nuevo", "", async () => {
+      item.archivo = await (await fetch(item.vista)).blob(); item.estado = "leyendo"; cola.push(item); pintar(); procesar();
+    }));
+  }
+  if (item.estado !== "leyendo") acc.appendChild(boton(ICONO_BORRAR, "Quitar de la lista", "borrar", () => { locales = locales.filter((x) => x !== item); pintar(); }));
+  return li;
+}
+function verImagen(src) {
+  if (!src) return;
   const v = document.createElement("div"); v.className = "visor";
-  v.innerHTML = '<img alt="Comprobante" />'; v.querySelector("img").src = p.vista || p.mini;
+  v.innerHTML = '<img alt="Comprobante" />'; v.querySelector("img").src = src;
   v.addEventListener("click", () => v.remove());
   document.body.appendChild(v);
 }
 
-$("filtro-fecha").addEventListener("change", pintar);
-$("btn-borrar").addEventListener("click", () => {
-  if (!confirm("¿Borrar TODOS los comprobantes de este celular? Esto no se puede deshacer.")) return;
-  pagos = []; guardar(); pintar(); toast("Listo, empezamos de cero");
-});
 $("btn-compartir").addEventListener("click", async () => {
-  const sel = $("filtro-fecha").value;
-  const validos = pagos.filter((p) => cuenta(p) && (!sel || p.datos.fecha === sel));
-  const porDia = {};
-  validos.forEach((p) => { porDia[p.datos.fecha] = (porDia[p.datos.fecha] || 0) + p.valor; });
-  const lineas = Object.keys(porDia).sort().map((f) => `• ${nombreFecha(f)}: ${plata(porDia[f])}`);
-  const texto = `Transferencias Club F10${sel ? " (" + nombreFecha(sel) + ")" : ""}\n${lineas.join("\n")}\nTotal: ${plata(validos.reduce((s, p) => s + p.valor, 0))} en ${validos.length} comprobantes`;
+  const t = totalesPorDia(), dias = Object.keys(t).sort().reverse().slice(0, 14);
+  const texto = `Transferencias Club F10\n${dias.map((f) => `• ${etiquetaDia(f) === "hoy" ? "Hoy" : etiquetaDia(f) === "ayer" ? "Ayer" : nombreFecha(f)}: ${plata(t[f].total)} (${t[f].n})`).join("\n")}`;
   if (navigator.share) { try { await navigator.share({ text: texto }); return; } catch { /* cancelado */ } }
   location.href = "https://wa.me/?text=" + encodeURIComponent(texto);
 });
@@ -234,7 +316,3 @@ $("btn-instalar").addEventListener("click", async () => {
   avisoInstalar.prompt(); await avisoInstalar.userChoice; avisoInstalar = null; $("btn-instalar").hidden = true;
 });
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(console.error);
-
-// Si se cerró la app mientras leía, esos quedan para reintentar
-pagos.forEach((p) => { if (p.estado === "leyendo") p.estado = "fallo"; });
-mostrar();

@@ -74,3 +74,24 @@ main { max-width: 640px; margin: 0 auto; padding: 16px 16px 40px; display: grid;
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px); background: var(--texto); color: #fff; padding: 10px 16px; border-radius: 10px; opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s; z-index: 40; max-width: calc(100% - 32px); }
 .toast.ver { opacity: 1; transform: translateX(-50%) translateY(0); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* Navegación por día */
+.fecha { display: grid; grid-template-columns: 48px 1fr 48px; gap: 8px; align-items: center; }
+.icono-grande { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 12px; border: 1px solid var(--borde); background: var(--tarjeta); color: var(--primario); cursor: pointer; }
+.fecha-centro { position: relative; display: grid; place-items: center; min-height: 48px; border-radius: 12px; border: 1px solid var(--borde); background: var(--tarjeta); color: var(--texto); font-size: 16px; text-transform: capitalize; cursor: pointer; }
+.fecha-centro input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+/* Totales por día */
+.dias { margin-top: 10px; }
+.dias-cabeza { display: flex; justify-content: space-between; align-items: center; }
+.dias h2 { font-size: 18px; margin: 0; }
+.lista-dias { list-style: none; margin: 10px 0 0; padding: 0; background: var(--tarjeta); border-radius: var(--radio); box-shadow: var(--sombra); overflow: hidden; }
+.lista-dias li { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 14px; border-top: 1px solid var(--apagado); cursor: pointer; }
+.lista-dias li:first-child { border-top: 0; }
+.lista-dias li:hover, .lista-dias li.activo { background: var(--fondo); }
+.lista-dias .d-nombre { text-transform: capitalize; font-weight: 700; }
+.lista-dias .d-nombre small { display: block; font-weight: 400; color: var(--suave); text-transform: none; }
+.lista-dias .d-total { font-weight: 700; font-variant-numeric: tabular-nums; }
+.lista-dias .vacio { cursor: default; justify-content: center; color: var(--suave); }
+.nube { text-align: center; font-size: 13px; color: var(--suave); margin: 4px 0 0; }
+.etiqueta.local { background: #DBEAFE; color: var(--primario); }
