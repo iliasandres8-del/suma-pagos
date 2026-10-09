@@ -111,10 +111,12 @@ function motivoNoSuma(d, valor) {
 async function guardarEnNube(item) {
   const d = item.datos;
   if (!item.huella) item.huella = await huellaDe(item.mini || JSON.stringify(d));
-  const id = llave(d, item.valor, item.huella);
-  if (nube.has(id) || (await getDoc(doc(db, "pagos", id))).exists()) { item.estado = "repetido"; item.repetidoDe = nube.get(id)?.fecha; return; }
+  // Solo se revisan repetidos dentro del mismo día; con "Sumar igual" se guarda aunque parezca repetido
+  const fecha = item.dia || hoyISO();
+  const id = item.forzar ? `${fecha}_X_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}` : `${fecha}_${llave(d, item.valor, item.huella)}`;
+  if (!item.forzar && (nube.has(id) || (await getDoc(doc(db, "pagos", id))).exists())) { item.estado = "repetido"; return; }
   await setDoc(doc(db, "pagos", id), {
-    valor: item.valor, fecha: item.dia || hoyISO(), fecha_comprobante: d.fecha || "", hora: d.hora || "", banco: d.banco || "", referencia: d.referencia || "",
+    valor: item.valor, fecha, fecha_comprobante: d.fecha || "", hora: d.hora || "", banco: d.banco || "", referencia: d.referencia || "",
     remitente: d.remitente || "", destinatario: d.destinatario || "", confianza: d.confianza || "",
     mini: item.mini || "", creado: serverTimestamp(),
   });
@@ -283,7 +285,7 @@ function filaLocal(item) {
   let texto = "", etiqueta = null, clase = "";
   if (item.estado === "leyendo") { texto = "Leyendo…"; clase = "leyendo"; }
   else if (item.estado === "fallo") { texto = item.error === "PIN" ? "El PIN cambió" : "No se pudo leer"; clase = "fallo"; }
-  else if (item.estado === "repetido") { texto = plata(item.valor); clase = "excluido"; etiqueta = ["repetido", "Ya estaba guardado" + (item.repetidoDe ? " (" + etiquetaDia(item.repetidoDe) + ")" : "") + " · no se suma otra vez"]; }
+  else if (item.estado === "repetido") { texto = plata(item.valor); clase = "excluido"; etiqueta = ["repetido", "Parece que ya lo mandaste hoy · si no es así, dale a Sumar igual"]; }
   else if (item.estado === "revisar") { texto = item.valor ? plata(item.valor) : "Sin valor"; clase = "excluido"; etiqueta = ["revisar", item.motivo + " · no se suma"]; }
   const li = armarFila(clase, item.mini, item.vista, texto, infoDe(d), etiqueta);
   const acc = li.querySelector(".acciones");
@@ -297,6 +299,15 @@ function filaLocal(item) {
       try { await guardarEnNube(item); pintar(); toast(item.estado === "repetido" ? "Ese comprobante ya estaba guardado" : "Guardado y sumado"); }
       catch (e) { console.error(e); toast("No se pudo guardar. Revisa el internet."); }
     }));
+  }
+  if (item.estado === "repetido") {
+    const b = document.createElement("button"); b.className = "btn btn-suave"; b.textContent = "Sumar igual";
+    b.addEventListener("click", async () => {
+      item.forzar = true; b.disabled = true;
+      try { await guardarEnNube(item); pintar(); toast("Sumado"); }
+      catch (e) { console.error(e); b.disabled = false; toast("No se pudo guardar. Revisa el internet."); }
+    });
+    acc.appendChild(b);
   }
   if (item.estado === "fallo" && item.vista) {
     acc.appendChild(boton(ICONO_REINTENTAR, "Intentar de nuevo", "", async () => {
