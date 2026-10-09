@@ -173,9 +173,18 @@ function procesar() {
       .finally(() => { trabajando--; pintar(); procesar(); });
   }
 }
-$("archivos").addEventListener("change", async (e) => {
-  const archivos = [...e.target.files];
-  e.target.value = "";
+$("archivos").addEventListener("change", (e) => { const a = [...e.target.files]; e.target.value = ""; agregar(a); });
+// En el PC: copiar la imagen en WhatsApp (clic derecho > Copiar) y pegarla aquí con Ctrl+V, o arrastrarla a la app
+document.addEventListener("paste", (e) => {
+  const a = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith("image/"));
+  if (a.length && !$("app").hidden) { e.preventDefault(); agregar(a); }
+});
+document.addEventListener("dragover", (e) => { if (!$("app").hidden) e.preventDefault(); });
+document.addEventListener("drop", (e) => {
+  const a = [...(e.dataTransfer?.files || [])].filter((f) => f.type.startsWith("image/"));
+  if (!$("app").hidden) { e.preventDefault(); if (a.length) agregar(a); }
+});
+async function agregar(archivos) {
   for (const archivo of archivos) {
     const item = { id: "local-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), estado: "leyendo", archivo, dia };
     try { item.huella = await huellaDe(archivo); item.mini = await reducir(archivo, 140, 0.6); item.vista = await reducir(archivo, 900, 0.75); }
@@ -185,7 +194,7 @@ $("archivos").addEventListener("change", async (e) => {
   }
   pintar(); procesar();
   if (archivos.length) toast(archivos.length === 1 ? "Leyendo el comprobante…" : `Leyendo ${archivos.length} comprobantes…`);
-});
+}
 
 // ---------- Pantalla ----------
 function irA(iso) { dia = iso; $("fecha-input").value = iso; pintar(); }
