@@ -2,7 +2,7 @@
 // Los comprobantes se guardan en Firebase (proyecto del club) para verlos desde cualquier celular.
 // La lectura la hace la función "leer-comprobante" de Supabase, que pide el PIN.
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth, onAuthStateChanged, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getFirestore, collection, query, where, onSnapshot, doc, getDoc, setDoc, updateDoc, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // App con nombre propio para que su sesión no se mezcle con la app de reservas (mismo dominio)
@@ -163,7 +163,7 @@ function procesar() {
         await guardarEnNube(item);
         if (item.estado !== "repetido" && datos.fecha !== dia) toast(`Ese comprobante es del ${etiquetaDia(datos.fecha)}: quedó sumado en ese día`);
       })
-      .catch((e) => { item.estado = "fallo"; item.error = e.message; })
+      .catch((e) => { item.estado = "fallo"; item.error = e.message; if (e.message === "PIN") { pin = null; escribirLocal("pin", null); signOut(auth); toast("El PIN cambió: entra con el nuevo"); } })
       .finally(() => { trabajando--; pintar(); procesar(); });
   }
 }
