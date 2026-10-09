@@ -91,23 +91,30 @@ function escucharNube() {
     $("estado-nube").textContent = "No pude conectar con la nube. Revisa el internet.";
   });
 }
-// Llave única por transferencia: así el mismo comprobante nunca se guarda dos veces
-function llave(d, valor) {
+// Llave única por comprobante: misma referencia o la misma imagen exacta = repetido, no se suma dos veces
+function llave(d, valor, huella) {
   const n = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-  return n(d.referencia) ? `R_${n(d.referencia)}_${valor}` : `S_${valor}_${d.fecha}_${n(d.hora)}_${n(d.remitente)}`.slice(0, 140);
+  return n(d.referencia).length >= 5 ? `R_${n(d.referencia)}_${valor}`.slice(0, 140) : `H_${huella}`;
+}
+async function huellaDe(datos) {
+  const bytes = typeof datos === "string" ? new TextEncoder().encode(datos) : await datos.arrayBuffer();
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return [...h.slice(0, 12)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 function motivoNoSuma(d, valor) {
   if (!d.es_comprobante) return "No parece un comprobante";
   if (d.estado === "fallido") return "Transferencia fallida";
   if (!valor) return "No se leyó el valor";
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.fecha || "")) return "No se leyó la fecha";
   return "";
 }
+// Se suma en el día en que se mandó la foto (el día que estaba abierto en la app), no en la fecha del comprobante
 async function guardarEnNube(item) {
-  const d = item.datos, id = llave(d, item.valor);
-  if (nube.has(id) || (await getDoc(doc(db, "pagos", id))).exists()) { item.estado = "repetido"; return; }
+  const d = item.datos;
+  if (!item.huella) item.huella = await huellaDe(item.mini || JSON.stringify(d));
+  const id = llave(d, item.valor, item.huella);
+  if (nube.has(id) || (await getDoc(doc(db, "pagos", id))).exists()) { item.estado = "repetido"; item.repetidoDe = nube.get(id)?.fecha; return; }
   await setDoc(doc(db, "pagos", id), {
-    valor: item.valor, fecha: d.fecha, hora: d.hora || "", banco: d.banco || "", referencia: d.referencia || "",
+    valor: item.valor, fecha: item.dia || hoyISO(), fecha_comprobante: d.fecha || "", hora: d.hora || "", banco: d.banco || "", referencia: d.referencia || "",
     remitente: d.remitente || "", destinatario: d.destinatario || "", confianza: d.confianza || "",
     mini: item.mini || "", creado: serverTimestamp(),
   });
@@ -161,7 +168,6 @@ function procesar() {
         item.motivo = motivoNoSuma(datos, item.valor);
         if (item.motivo) { item.estado = "revisar"; return; }
         await guardarEnNube(item);
-        if (item.estado !== "repetido" && datos.fecha !== dia) toast(`Ese comprobante es del ${etiquetaDia(datos.fecha)}: quedó sumado en ese día`);
       })
       .catch((e) => { item.estado = "fallo"; item.error = e.message; if (e.message === "PIN") { pin = null; escribirLocal("pin", null); signOut(auth); toast("El PIN cambió: entra con el nuevo"); } })
       .finally(() => { trabajando--; pintar(); procesar(); });
@@ -171,8 +177,8 @@ $("archivos").addEventListener("change", async (e) => {
   const archivos = [...e.target.files];
   e.target.value = "";
   for (const archivo of archivos) {
-    const item = { id: "local-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), estado: "leyendo", archivo };
-    try { item.mini = await reducir(archivo, 140, 0.6); item.vista = await reducir(archivo, 900, 0.75); }
+    const item = { id: "local-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), estado: "leyendo", archivo, dia };
+    try { item.huella = await huellaDe(archivo); item.mini = await reducir(archivo, 140, 0.6); item.vista = await reducir(archivo, 900, 0.75); }
     catch { item.estado = "fallo"; }
     locales.push(item);
     if (item.estado === "leyendo") cola.push(item);
@@ -204,7 +210,7 @@ function pintar() {
 
   const ul = $("lista"); ul.innerHTML = "";
   // Arriba lo que pasa en este celular (leyendo, fallidos, repetidos, por revisar)
-  for (const item of locales) if (item.estado !== "revisar" && item.estado !== "repetido" || !item.datos?.fecha || item.datos.fecha === dia) ul.appendChild(filaLocal(item));
+  for (const item of locales) if ((item.dia || dia) === dia) ul.appendChild(filaLocal(item));
   delDia.forEach((p) => ul.appendChild(filaNube(p)));
 
   // Totales por día
@@ -268,7 +274,7 @@ function filaLocal(item) {
   let texto = "", etiqueta = null, clase = "";
   if (item.estado === "leyendo") { texto = "Leyendo…"; clase = "leyendo"; }
   else if (item.estado === "fallo") { texto = item.error === "PIN" ? "El PIN cambió" : "No se pudo leer"; clase = "fallo"; }
-  else if (item.estado === "repetido") { texto = plata(item.valor); clase = "excluido"; etiqueta = ["repetido", "Ya estaba guardado · no se suma otra vez"]; }
+  else if (item.estado === "repetido") { texto = plata(item.valor); clase = "excluido"; etiqueta = ["repetido", "Ya estaba guardado" + (item.repetidoDe ? " (" + etiquetaDia(item.repetidoDe) + ")" : "") + " · no se suma otra vez"]; }
   else if (item.estado === "revisar") { texto = item.valor ? plata(item.valor) : "Sin valor"; clase = "excluido"; etiqueta = ["revisar", item.motivo + " · no se suma"]; }
   const li = armarFila(clase, item.mini, item.vista, texto, infoDe(d), etiqueta);
   const acc = li.querySelector(".acciones");
@@ -277,10 +283,8 @@ function filaLocal(item) {
       const v = prompt("Valor de este comprobante (solo números):", item.valor || "");
       if (v === null) return;
       const n = Number(String(v).replace(/[^\d]/g, ""));
-      let f = d.fecha;
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(f || "")) { f = prompt("Fecha de la transferencia (AAAA-MM-DD):", dia); if (!f || !/^\d{4}-\d{2}-\d{2}$/.test(f)) return; }
       if (!(n > 0)) return;
-      item.valor = n; item.datos = { ...d, es_comprobante: true, fecha: f, confianza: "alta" };
+      item.valor = n; item.datos = { ...d, es_comprobante: true, estado: "exitoso", confianza: "alta" };
       try { await guardarEnNube(item); pintar(); toast(item.estado === "repetido" ? "Ese comprobante ya estaba guardado" : "Guardado y sumado"); }
       catch (e) { console.error(e); toast("No se pudo guardar. Revisa el internet."); }
     }));
