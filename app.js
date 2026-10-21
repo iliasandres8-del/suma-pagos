@@ -149,20 +149,20 @@ async function reducir(archivo, lado, calidad) {
   return c.toDataURL("image/jpeg", calidad);
 }
 async function leer(item) {
-  const imagen = (await reducir(item.archivo, 1600, 0.85)).split(",")[1];
+  const imagen = (await reducir(item.archivo, 1024, 0.8)).split(",")[1]; // 1024 px se lee igual de bien y sube más rápido
   for (let intento = 0; intento < 4; intento++) {
     let r;
     try { r = await fetch(URL_LECTOR, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin, imagen, tipo: "image/jpeg" }) }); }
-    catch { await new Promise((ok) => setTimeout(ok, 3000 * (intento + 1))); continue; }
+    catch { await new Promise((ok) => setTimeout(ok, 1500 * (intento + 1))); continue; }
     if (r.ok) return (await r.json()).datos;
     if (r.status === 401) throw new Error("PIN");
-    await new Promise((ok) => setTimeout(ok, 4000 * (intento + 1))); // lector ocupado: espera y reintenta
+    await new Promise((ok) => setTimeout(ok, 2000 * (intento + 1))); // lector ocupado: espera y reintenta
   }
   throw new Error("No se pudo leer");
 }
 const cola = []; let trabajando = 0;
 function procesar() {
-  while (trabajando < 2 && cola.length) {
+  while (trabajando < 4 && cola.length) {
     const item = cola.shift(); trabajando++;
     leer(item)
       .then(async (datos) => {
@@ -192,9 +192,10 @@ async function agregar(archivos) {
     try { item.huella = await huellaDe(archivo); item.mini = await reducir(archivo, 140, 0.6); item.vista = await reducir(archivo, 900, 0.75); }
     catch { item.estado = "fallo"; }
     locales.push(item);
-    if (item.estado === "leyendo") cola.push(item);
+    // Cada foto empieza a leerse apenas está lista, sin esperar a que se preparen las demás
+    if (item.estado === "leyendo") { cola.push(item); procesar(); }
+    pintar();
   }
-  pintar(); procesar();
   if (archivos.length) toast(archivos.length === 1 ? "Leyendo el comprobante…" : `Leyendo ${archivos.length} comprobantes…`);
 }
 

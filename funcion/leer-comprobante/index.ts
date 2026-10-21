@@ -62,23 +62,26 @@ Deno.serve(async (req) => {
   if (!cuerpo.imagen) return responder({ ok: true }); // sirve para comprobar el PIN
   if (cuerpo.imagen.length > 6_000_000) return responder({ error: "La imagen es muy grande" }, 413);
 
-  const peticion = {
-    contents: [{ parts: [{ inlineData: { mimeType: cuerpo.tipo || "image/jpeg", data: cuerpo.imagen } }, { text: INSTRUCCIONES }] }],
-    generationConfig: { responseMimeType: "application/json", responseSchema: ESQUEMA, temperature: 0 },
-  };
+  const contents = [{ parts: [{ inlineData: { mimeType: cuerpo.tipo || "image/jpeg", data: cuerpo.imagen } }, { text: INSTRUCCIONES }] }];
+  const base = { responseMimeType: "application/json", responseSchema: ESQUEMA, temperature: 0 };
+  // Sin "pensar": leer un comprobante no lo necesita y baja la respuesta de ~25 s a ~2 s.
+  // Si algún modelo no acepta esa opción (400), se vuelve a pedir sin ella.
+  const sinPensar = { ...base, thinkingConfig: { thinkingBudget: 0 } };
   let ultimoError = "";
   for (const modelo of MODELOS) {
-    try {
-      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
-        method: "POST", headers: { "x-goog-api-key": s.gemini_api_key, "Content-Type": "application/json" }, body: JSON.stringify(peticion),
-      });
-      if (!r.ok) { ultimoError = `${modelo}: ${r.status}`; continue; }
-      const j = await r.json();
-      const texto = j.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || "").join("") || "";
-      const datos = JSON.parse(texto);
-      datos.valor = Math.round(Number(datos.valor) || 0);
-      return responder({ ok: true, modelo, datos });
-    } catch (e) { ultimoError = `${modelo}: ${(e as Error).message}`; }
+    for (const generationConfig of [sinPensar, base]) {
+      try {
+        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
+          method: "POST", headers: { "x-goog-api-key": s.gemini_api_key, "Content-Type": "application/json" }, body: JSON.stringify({ contents, generationConfig }),
+        });
+        if (!r.ok) { ultimoError = `${modelo}: ${r.status}`; if (r.status === 400 && generationConfig === sinPensar) continue; break; }
+        const j = await r.json();
+        const texto = j.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || "").join("") || "";
+        const datos = JSON.parse(texto);
+        datos.valor = Math.round(Number(datos.valor) || 0);
+        return responder({ ok: true, modelo, datos });
+      } catch (e) { ultimoError = `${modelo}: ${(e as Error).message}`; break; }
+    }
   }
   return responder({ error: "No pude leer la imagen ahora. Intenta en un minuto.", detalle: ultimoError }, 503);
 });
