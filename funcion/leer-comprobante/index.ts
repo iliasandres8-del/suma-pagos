@@ -9,7 +9,7 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "content-type",
 };
-const MODELOS = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"];
+const MODELOS = ["gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-flash-latest"];
 
 let secretos: Record<string, string> | null = null;
 async function cargar() {
