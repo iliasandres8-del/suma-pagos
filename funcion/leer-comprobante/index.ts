@@ -9,7 +9,7 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "content-type",
 };
-const MODELOS = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
+const MODELOS = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"];
 
 let secretos: Record<string, string> | null = null;
 async function cargar() {
@@ -63,24 +63,32 @@ Deno.serve(async (req) => {
   if (cuerpo.imagen.length > 6_000_000) return responder({ error: "La imagen es muy grande" }, 413);
 
   const contents = [{ parts: [{ inlineData: { mimeType: cuerpo.tipo || "image/jpeg", data: cuerpo.imagen } }, { text: INSTRUCCIONES }] }];
-  const base = { responseMimeType: "application/json", responseSchema: ESQUEMA, temperature: 0 };
-  // Sin "pensar": leer un comprobante no lo necesita y baja la respuesta de ~25 s a ~2 s.
-  // Si algún modelo no acepta esa opción (400), se vuelve a pedir sin ella.
-  const sinPensar = { ...base, thinkingConfig: { thinkingBudget: 0 } };
+  const base: Record<string, unknown> = { responseMimeType: "application/json", responseSchema: ESQUEMA, temperature: 0 };
+  // Sin "pensar": leer un comprobante no lo necesita. Los Gemini 3 usan thinkingLevel (thinkingBudget ya no los
+  // apaga y llegaban a tardar 25-100 s). Se prueba primero lo más rápido; si un modelo rechaza la opción (400),
+  // se pide con la siguiente. Cada intento tiene tope de 20 s para no quedarse colgado.
+  const opciones: Record<string, unknown>[] = [
+    { ...base, thinkingConfig: { thinkingLevel: "minimal" } },
+    { ...base, thinkingConfig: { thinkingBudget: 0 } },
+    base,
+  ];
   let ultimoError = "";
   for (const modelo of MODELOS) {
-    for (const generationConfig of [sinPensar, base]) {
+    for (const generationConfig of opciones) {
+      const t0 = Date.now();
       try {
         const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
-          method: "POST", headers: { "x-goog-api-key": s.gemini_api_key, "Content-Type": "application/json" }, body: JSON.stringify({ contents, generationConfig }),
+          method: "POST", headers: { "x-goog-api-key": s.gemini_api_key, "Content-Type": "application/json" },
+          body: JSON.stringify({ contents, generationConfig }), signal: AbortSignal.timeout(20000),
         });
-        if (!r.ok) { ultimoError = `${modelo}: ${r.status}`; if (r.status === 400 && generationConfig === sinPensar) continue; break; }
+        if (!r.ok) { ultimoError = `${modelo}: ${r.status} ${(await r.text()).slice(0, 150)}`; if (r.status === 400) continue; break; }
         const j = await r.json();
         const texto = j.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || "").join("") || "";
         const datos = JSON.parse(texto);
         datos.valor = Math.round(Number(datos.valor) || 0);
+        console.log(`leido con ${modelo} ${JSON.stringify(generationConfig.thinkingConfig ?? "base")} en ${Date.now() - t0} ms`);
         return responder({ ok: true, modelo, datos });
-      } catch (e) { ultimoError = `${modelo}: ${(e as Error).message}`; break; }
+      } catch (e) { ultimoError = `${modelo}: ${(e as Error).message}`; console.log("fallo", ultimoError); break; }
     }
   }
   return responder({ error: "No pude leer la imagen ahora. Intenta en un minuto.", detalle: ultimoError }, 503);
